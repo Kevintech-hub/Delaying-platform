@@ -1,19 +1,42 @@
 // SQLite is used here for zero-config local/dev storage — a single file
 // on disk, nothing to install or provision.
 //
-// IMPORTANT if you deploy this platform itself to Heroku: Heroku's dyno
-// filesystem is ephemeral AND read-only outside /tmp, so a SQLite file
-// here gets wiped (or fails to write at all) on every restart or deploy.
-// Swap this file for Heroku Postgres (the `pg` package) before you rely
-// on this in production — every route only calls the functions exported
-// below, so that swap stays contained to this one file. See README.md.
+// IMPORTANT: Serverless/Ephemeral platforms (Heroku, Render, Vercel) have 
+// read-only filesystems outside temporary directories. For production, 
+// swap this for standard PostgreSQL (using the `pg` package).
 
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
 
-const db = new Database(path.join(__dirname, '..', 'data', 'platform.db'));
-db.pragma('journal_mode = WAL');
+// 1. Ensure the parent directory exists to prevent "unable to open database file"
+const dataDir = process.env.NODE_ENV === 'production' && process.env.HEROKU_TMP
+  ? path.join('/tmp', 'data') 
+  : path.join(__dirname, '..', 'data');
+
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+const dbPath = path.join(dataDir, 'platform.db');
+
+// 2. Initialize Database with proper fallback handling
+let db;
+try {
+  db = new Database(dbPath);
+  
+  // Try enabling WAL mode. If the filesystem blocks temporary SHM/WAL files, fallback to DELETE mode
+  try {
+    db.pragma('journal_mode = WAL');
+  } catch (walError) {
+    console.warn('WAL mode failed, falling back to standard journal mode:', walError.message);
+    db.pragma('journal_mode = DELETE');
+  }
+} catch (err) {
+  console.error(`Failed to initialize SQLite database at ${dbPath}:`, err.message);
+  throw err;
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -150,9 +173,6 @@ function countReferrals(userId) {
 }
 
 // ── Deployments ─────────────────────────────────────────
-// Note what is *not* stored here: SESSION_ID and any other env values the
-// user enters are forwarded straight to Heroku's API and never written to
-// this database — only metadata about the deployment attempt is kept.
 
 function createDeployment({ userId, botSlug, appName, herokuAppSetupId, coinsCharged = 0 }) {
   const now = Date.now();
